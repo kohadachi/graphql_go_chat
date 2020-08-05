@@ -9,7 +9,6 @@ import (
 	"github.com/go-redis/redis"
 	"github.com/gorilla/websocket"
 	"github.com/kouheiadachi/graphql_go_chat/graph"
-	"github.com/kouheiadachi/graphql_go_chat/graph/generated"
 	"github.com/rs/cors"
 )
 
@@ -34,7 +33,7 @@ func (s *GraphQLServer) Serve(route string, port int) error {
 	mux := http.NewServeMux()
 	mux.Handle(
 		route,
-		handler.GraphQL(generated.NewExecutableSchema(graph.NewGraphQLConfig(s.redisClient)),
+		handler.GraphQL(graph.NewExecutableSchema(graph.NewGraphQLConfig(s.redisClient)),
 			handler.WebsocketUpgrader(websocket.Upgrader{
 				CheckOrigin: func(r *http.Request) bool {
 					return true

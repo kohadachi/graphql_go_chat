@@ -1,40 +1,94 @@
 package graph
 
-// This file will be automatically regenerated based on the schema, any resolver implementations
-// will be copied through when generating and any unknown code will be moved to the end.
-
 import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/go-redis/redis"
 	"log"
 	"sync"
 	"time"
-
-	"github.com/go-redis/redis"
-	"github.com/kouheiadachi/graphql_go_chat/graph/generated"
-	"github.com/kouheiadachi/graphql_go_chat/graph/model"
 )
 
-func (r *mutationResolver) PostMessage(ctx context.Context, user string, message string) (*model.Message, error) {
-	isLogined, _ := r.checkLogin(user)
+// NewGraphQLConfig returns Config and start subscribing redis pubsub.
+func NewGraphQLConfig(redisClient *redis.Client) Config {
+	resolver := newResolver(redisClient)
+
+	resolver.startSubscribingRedis()
+
+	return Config{
+		Resolvers: resolver,
+	}
+}
+
+// Resolver implements ResolverRoot interface.
+type Resolver struct {
+	redisClient     *redis.Client
+	messageChannels map[string]chan Message
+	userChannels    map[string]chan string
+	mutex           sync.Mutex
+}
+
+func newResolver(redisClient *redis.Client) *Resolver {
+	return &Resolver{
+		redisClient:     redisClient,
+		messageChannels: map[string]chan Message{},
+		userChannels:    map[string]chan string{},
+		mutex:           sync.Mutex{},
+	}
+}
+
+// Mutation returns a resolver for mutation.
+func (r *Resolver) Mutation() MutationResolver {
+	return &mutationResolver{r}
+}
+
+// Query returns a resolver for query.
+func (r *Resolver) Query() QueryResolver {
+	return &queryResolver{r}
+}
+
+// Subscription returns a resolver for subsctiption.
+func (r *Resolver) Subscription() SubscriptionResolver {
+	return &subscriptionResolver{r}
+}
+
+type mutationResolver struct{ *Resolver }
+
+func (r *mutationResolver) PostMessage(ctx context.Context, user string, message string) (*Message, error) {
+	isLogined, err := r.checkLogin(user)
+	if err != nil {
+		return nil, err
+	}
 	if !isLogined {
 		return nil, errors.New("This user does not exists")
 	}
-	// ユーザー情報はAFK(Away From Keyboard)対策で60minで削除されるようにしている。
-	// メッセージの投稿を行った場合はExpireまでの時間をリセットする。
-	val, _ := r.redisClient.SetXX(user, user, 60*time.Minute).Result()
+
+	// extend session expire
+	val, err := r.redisClient.SetXX(user, user, 60*time.Minute).Result()
+	if err != nil {
+		log.Println(err)
+		return nil, err
+	}
 	if val == false {
 		return nil, errors.New("This user does not exists")
 	}
 
-	// 以下の部分で、[]byteに変換したMessageをredisのPubSubで配信しています。
-	m := model.Message{
+	// Publish a message.
+	m := Message{
 		User:    user,
 		Message: message,
 	}
-	mb, _ := json.Marshal(m)
+	mb, err := json.Marshal(m)
+	if err != nil {
+		log.Println(err)
+		return nil, err
+
+	}
 	r.redisClient.Publish("room", mb)
+
+	log.Println("【Mutation】PostMessage : ", m)
+
 	return &m, nil
 }
 
@@ -60,6 +114,8 @@ func (r *mutationResolver) CreateUser(ctx context.Context, user string) (string,
 	return user, nil
 }
 
+type queryResolver struct{ *Resolver }
+
 func (r *queryResolver) Users(ctx context.Context) ([]string, error) {
 	users, err := r.redisClient.Keys("*").Result()
 	if err != nil {
@@ -70,9 +126,12 @@ func (r *queryResolver) Users(ctx context.Context) ([]string, error) {
 	log.Println("【Query】Users : ", users)
 
 	return users, nil
+
 }
 
-func (r *subscriptionResolver) MessagePosted(ctx context.Context, user string) (<-chan *model.Message, error) {
+type subscriptionResolver struct{ *Resolver }
+
+func (r *subscriptionResolver) MessagePosted(ctx context.Context, user string) (<-chan *Message, error) {
 	isLogined, err := r.checkLogin(user)
 	if err != nil {
 		return nil, err
@@ -81,9 +140,9 @@ func (r *subscriptionResolver) MessagePosted(ctx context.Context, user string) (
 		return nil, errors.New("This user has not been created")
 	}
 
-	messageChan := make(chan *model.Message, 1)
+	messageChan := make(chan *Message, 1)
 	r.mutex.Lock()
-	r.messageChannels[user] = messageChan
+	//r.messageChannels[user] = messageChan
 	r.mutex.Unlock()
 
 	go func() {
@@ -126,49 +185,6 @@ func (r *subscriptionResolver) UserJoined(ctx context.Context, user string) (<-c
 	return userChan, nil
 }
 
-// Mutation returns generated.MutationResolver implementation.
-func (r *Resolver) Mutation() generated.MutationResolver { return &mutationResolver{r} }
-
-// Query returns generated.QueryResolver implementation.
-func (r *Resolver) Query() generated.QueryResolver { return &queryResolver{r} }
-
-// Subscription returns generated.SubscriptionResolver implementation.
-func (r *Resolver) Subscription() generated.SubscriptionResolver { return &subscriptionResolver{r} }
-
-type mutationResolver struct{ *Resolver }
-type queryResolver struct{ *Resolver }
-type subscriptionResolver struct{ *Resolver }
-
-// !!! WARNING !!!
-// The code below was going to be deleted when updating resolvers. It has been copied here so you have
-// one last chance to move it out of harms way if you want. There are two reasons this happens:
-//  - When renaming or deleting a resolver the old code will be put in here. You can safely delete
-//    it when you're done.
-//  - You have helper methods in this file. Move them out to keep these resolver files clean.
-func NewGraphQLConfig(redisClient *redis.Client) generated.Config {
-	resolver := newResolver(redisClient)
-	resolver.startSubscribingRedis()
-
-	return generated.Config{
-		Resolvers: resolver,
-	}
-}
-
-type Resolver struct {
-	redisClient     *redis.Client
-	messageChannels map[string]chan model.Message
-	userChannels    map[string]chan string
-	mutex           sync.Mutex
-}
-
-func newResolver(redisClient *redis.Client) *Resolver {
-	return &Resolver{
-		redisClient:     redisClient,
-		messageChannels: map[string]chan model.Message{},
-		userChannels:    map[string]chan string{},
-		mutex:           sync.Mutex{},
-	}
-}
 func (r *Resolver) checkLogin(user string) (bool, error) {
 	val, err := r.redisClient.Exists(user).Result()
 	if err != nil {
@@ -181,6 +197,7 @@ func (r *Resolver) checkLogin(user string) (bool, error) {
 	}
 	return false, nil
 }
+
 func (r *Resolver) startSubscribingRedis() {
 	log.Println("Start Subscribing Redis...")
 
@@ -198,7 +215,7 @@ func (r *Resolver) startSubscribingRedis() {
 			case *redis.Message:
 
 				// Convert recieved string to Message.
-				m := model.Message{}
+				m := Message{}
 				if err := json.Unmarshal([]byte(msg.Payload), &m); err != nil {
 					log.Println(err)
 					continue
