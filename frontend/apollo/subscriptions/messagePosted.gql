@@ -1,6 +1,0 @@
-subscription($user: String!) {
-  messagePosted(user: $user) {
-    user
-    message
-  }
-}

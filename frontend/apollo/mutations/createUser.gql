@@ -1,3 +1,0 @@
-mutation($user: String!) {
-  createUser(user: $user)
-}
